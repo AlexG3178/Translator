@@ -6,6 +6,7 @@ import os
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 from transformers import BertTokenizer
+from tqdm import tqdm
 
 
 class TranslationDataset(Dataset):
@@ -186,7 +187,7 @@ class Transformer(nn.Module):
         src_mask = (src != 0).unsqueeze(1).unsqueeze(2)
         tgt_mask = (tgt != 0).unsqueeze(1).unsqueeze(3)
         seq_length = tgt.size(1)
-        nopeak_mask = (1 - torch.triu(torch.ones(1, seq_length, seq_length), diagonal=1)).bool()
+        nopeak_mask = (1 - torch.triu(torch.ones(1, seq_length, seq_length, device=src.device), diagonal=1)).bool()
         tgt_mask = tgt_mask & nopeak_mask
         return src_mask, tgt_mask
 
@@ -251,6 +252,10 @@ def main():
     batch_size = 32
     learning_rate = 0.0001
     
+    # Automatically use GPU if available, otherwise use CPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
     src_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')  # Tokenizer for English
     tgt_tokenizer = BertTokenizer.from_pretrained('dccuchile/bert-base-spanish-wwm-cased')  # Tokenizer for Spanish
     
@@ -258,6 +263,7 @@ def main():
     tgt_vocab_size = tgt_tokenizer.vocab_size
 
     transformer = Transformer(src_vocab_size, tgt_vocab_size, d_model, num_heads, num_layers, d_ff, dropout)
+    transformer.to(device)
 
     criterion = nn.CrossEntropyLoss(ignore_index=0)
     optimizer = optim.Adam(transformer.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-9)
@@ -274,8 +280,11 @@ def main():
     dataloader = get_dataloader_from_dataset(ds, src_tokenizer, tgt_tokenizer, batch_size=32, max_length=128)
 
     for epoch in range(start_epoch, num_epochs):
-        for src_batch, tgt_batch in dataloader:
+        for src_batch, tgt_batch in tqdm(dataloader):
             optimizer.zero_grad()
+            
+            src_batch = src_batch.to(device)
+            tgt_batch = tgt_batch.to(device)
             
             output = transformer(src_batch, tgt_batch[:, :-1])
             loss = criterion(output.contiguous().view(-1, tgt_vocab_size), tgt_batch[:, 1:].contiguous().view(-1))
