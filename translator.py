@@ -37,8 +37,8 @@ class TranslationDataset(Dataset):
     
 def get_dataloader_from_dataset(dataset, src_tokenizer, tgt_tokenizer, batch_size=64, max_length=100):
     
-    src_sentences = [example['translation']['en'] for example in dataset['train']]
-    tgt_sentences = [example['translation']['es'] for example in dataset['train']]
+    src_sentences = dataset['en']
+    tgt_sentences = dataset['es']
     dataset = TranslationDataset(src_sentences, tgt_sentences, src_tokenizer, tgt_tokenizer, max_length)
 
     # Create DataLoader
@@ -223,7 +223,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, loss, file_path="transfo
 
 def load_checkpoint(model, optimizer, scheduler, file_path="transformer_checkpoint.pth"):
     if os.path.isfile(file_path):
-        checkpoint = torch.load(file_path)
+        checkpoint = torch.load(file_path, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -252,10 +252,14 @@ def main():
     batch_size = 32
     learning_rate = 0.0001
     
-    # Automatically use GPU if available, otherwise use CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
+    ds = load_dataset("bstraehle/en-to-es-auto-finance", split="train")
+    split_ds = ds.train_test_split(test_size=0.1, seed=41)  
+    train_ds = split_ds['train']
+    val_ds = split_ds['test']
+   
     src_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')  # Tokenizer for English
     tgt_tokenizer = BertTokenizer.from_pretrained('dccuchile/bert-base-spanish-wwm-cased')  # Tokenizer for Spanish
     
@@ -276,8 +280,7 @@ def main():
 
     transformer.train()
     
-    ds = load_dataset("qanastek/WMT-16-PubMed", "en-es")
-    dataloader = get_dataloader_from_dataset(ds, src_tokenizer, tgt_tokenizer, batch_size=32, max_length=128)
+    dataloader = get_dataloader_from_dataset(train_ds, src_tokenizer, tgt_tokenizer, batch_size=32, max_length=128)
 
     for epoch in range(start_epoch, num_epochs):
         for src_batch, tgt_batch in tqdm(dataloader):
@@ -297,18 +300,18 @@ def main():
    
     # Save checkpoint every 10 epochs or if validation loss improves
         if (epoch + 1) % 10 == 0 or loss.item() < best_val_loss:
-            save_checkpoint(transformer, optimizer, scheduler, epoch + 1, loss.item(), file_path="transformer_checkpoint.pth")
+            # save_checkpoint(transformer, optimizer, scheduler, epoch + 1, loss.item(), file_path="transformer_checkpoint.pth")
             best_val_loss = min(best_val_loss, loss.item())
         
     transformer.eval()
     
-     # Validation set (not included in dataset download above, you'll need to adjust for this)
-    val_ds = load_dataset("qanastek/WMT-16-PubMed", "en-es", split="validation")
     val_dataloader = get_dataloader_from_dataset(val_ds, src_tokenizer, tgt_tokenizer, batch_size=batch_size)
 
     with torch.no_grad(): 
         val_loss_total = 0
         for val_src, val_tgt in val_dataloader:
+            val_src = val_src.to(device)
+            val_tgt = val_tgt.to(device)
             val_output = transformer(val_src, val_tgt[:, :-1])
             val_loss = criterion(val_output.contiguous().view(-1, tgt_vocab_size), val_tgt[:, 1:].contiguous().view(-1))
             val_loss_total += val_loss.item()
@@ -316,7 +319,7 @@ def main():
         print(f"Validation Loss: {val_loss_total / len(val_dataloader):.4f}")
         
         # Save final model
-        save_checkpoint(transformer, optimizer, scheduler, num_epochs, val_loss.item(), file_path="transformer_final.pth")
+        # save_checkpoint(transformer, optimizer, scheduler, num_epochs, val_loss.item(), file_path="transformer_final.pth")
         
 
 if __name__ == "__main__":
