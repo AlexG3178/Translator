@@ -1,8 +1,50 @@
 import torch
 import torch.nn as nn
-import torch.utils.data as data
+import torch.optim as optim
 import numpy as np
+import os
+from torch.utils.data import Dataset, DataLoader
+from datasets import load_dataset
+from transformers import BertTokenizer
 
+
+class TranslationDataset(Dataset):
+    def __init__(self, src_sentences, tgt_sentences, src_tokenizer, tgt_tokenizer, max_length=100):
+        self.src_sentences = src_sentences
+        self.tgt_sentences = tgt_sentences
+        self.src_tokenizer = src_tokenizer
+        self.tgt_tokenizer = tgt_tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.src_sentences)
+
+    def __getitem__(self, idx):
+        src_sentence = self.src_sentences[idx]
+        tgt_sentence = self.tgt_sentences[idx]
+
+        # Add special tokens
+        src_sentence = "<SOS> " + src_sentence + " <EOS>"
+        tgt_sentence = "<SOS> " + tgt_sentence + " <EOS>"
+
+        # Tokenize both sentences
+        src_tokens = self.src_tokenizer.encode(src_sentence, padding='max_length', truncation=True, max_length=self.max_length, return_tensors="pt").squeeze()
+        tgt_tokens = self.tgt_tokenizer.encode(tgt_sentence, padding='max_length', truncation=True, max_length=self.max_length, return_tensors="pt").squeeze()
+
+        return src_tokens, tgt_tokens
+    
+    
+def get_dataloader_from_dataset(dataset, src_tokenizer, tgt_tokenizer, batch_size=64, max_length=100):
+    
+    src_sentences = [example['translation']['en'] for example in dataset['train']]
+    tgt_sentences = [example['translation']['es'] for example in dataset['train']]
+    dataset = TranslationDataset(src_sentences, tgt_sentences, src_tokenizer, tgt_tokenizer, max_length)
+
+    # Create DataLoader
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    return dataloader
+    
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads):
@@ -72,7 +114,7 @@ class PositionWiseFeedForward(nn.Module):
     
     
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_seq_length):
+    def __init__(self, d_model, max_seq_length=512):
         super(PositionalEncoding, self).__init__()
         
         pe = torch.zeros(max_seq_length, d_model)
@@ -85,7 +127,8 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe.unsqueeze(0))
         
     def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
+        seq_length = x.size(1)
+        return x + self.pe[:, :seq_length]
     
     
 class EncoderLayer(nn.Module):
@@ -127,11 +170,11 @@ class DecoderLayer(nn.Module):
 
     
 class Transformer(nn.Module):
-    def __init__(self, src_vocab_size, tgt_vocab_size, d_model, num_heads, num_layers, d_ff, max_seq_length, dropout):
+    def __init__(self, src_vocab_size, tgt_vocab_size, d_model, num_heads, num_layers, d_ff, dropout):
         super(Transformer, self).__init__()
         self.encoder_embedding = nn.Embedding(src_vocab_size, d_model)
         self.decoder_embedding = nn.Embedding(tgt_vocab_size, d_model)
-        self.positional_encoding = PositionalEncoding(d_model, max_seq_length)
+        self.positional_encoding = PositionalEncoding(d_model)
 
         self.encoder_layers = nn.ModuleList([EncoderLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)])
         self.decoder_layers = nn.ModuleList([DecoderLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)])
@@ -164,50 +207,107 @@ class Transformer(nn.Module):
         return output
     
     
+#region Helper Functions
+
+def save_checkpoint(model, optimizer, scheduler, epoch, loss, file_path="transformer_checkpoint.pth"):
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'loss': loss
+    }
+    torch.save(checkpoint, file_path)
+    print(f"Checkpoint saved at {file_path}")
+
+def load_checkpoint(model, optimizer, scheduler, file_path="transformer_checkpoint.pth"):
+    if os.path.isfile(file_path):
+        checkpoint = torch.load(file_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        epoch = checkpoint['epoch']
+        loss = checkpoint['loss']
+        print(f"Checkpoint loaded from {file_path} (epoch {epoch}, loss {loss:.4f})")
+        return epoch, loss
+    else:
+        print(f"No checkpoint found at {file_path}")
+        return 0, float('inf')  # If no checkpoint, start from epoch 0
+
+#endregion
+
+
+    
 #region Main
 
 def main():    
 
-    src_vocab_size = 5000
-    tgt_vocab_size = 5000
-    d_model = 512
+    num_epochs = 50
     num_heads = 8
     num_layers = 6
+    d_model = 512
     d_ff = 2048
-    max_seq_length = 100
     dropout = 0.1
+    batch_size = 32
+    learning_rate = 0.0001
+    
+    src_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')  # Tokenizer for English
+    tgt_tokenizer = BertTokenizer.from_pretrained('dccuchile/bert-base-spanish-wwm-cased')  # Tokenizer for Spanish
+    
+    src_vocab_size = src_tokenizer.vocab_size
+    tgt_vocab_size = tgt_tokenizer.vocab_size
 
-    transformer = Transformer(src_vocab_size, tgt_vocab_size, d_model, num_heads, num_layers, d_ff, max_seq_length, dropout)
-
-    # Generate random sample data
-    src_data = torch.randint(1, src_vocab_size, (64, max_seq_length))  # (batch_size, seq_length)
-    tgt_data = torch.randint(1, tgt_vocab_size, (64, max_seq_length))  # (batch_size, seq_length)
+    transformer = Transformer(src_vocab_size, tgt_vocab_size, d_model, num_heads, num_layers, d_ff, dropout)
 
     criterion = nn.CrossEntropyLoss(ignore_index=0)
-    # optimizer = torch.optim.Adam(transformer.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9)
-    optimizer = torch.optim.Adam(transformer.parameters(), lr=0.0001, betas=(0.9, 0.98), eps=1e-9) # type: ignore
+    optimizer = optim.Adam(transformer.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-9)
+    
+    # Define scheduler - StepLR reduces the learning rate by `gamma` every `step_size` epochs
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.95)
+    
+    # Load checkpoint if exists
+    start_epoch, best_val_loss = load_checkpoint(transformer, optimizer, scheduler, file_path="transformer_checkpoint.pth")
 
     transformer.train()
+    
+    ds = load_dataset("qanastek/WMT-16-PubMed", "en-es")
+    dataloader = get_dataloader_from_dataset(ds, src_tokenizer, tgt_tokenizer, batch_size=32, max_length=128)
 
-    for epoch in range(100):
-        optimizer.zero_grad()
-        output = transformer(src_data, tgt_data[:, :-1])
-        loss = criterion(output.contiguous().view(-1, tgt_vocab_size), tgt_data[:, 1:].contiguous().view(-1))
-        loss.backward()
-        optimizer.step()
-        print(f"Epoch: {epoch+1}, Loss: {loss.item()}")
+    for epoch in range(start_epoch, num_epochs):
+        for src_batch, tgt_batch in dataloader:
+            optimizer.zero_grad()
+            
+            output = transformer(src_batch, tgt_batch[:, :-1])
+            loss = criterion(output.contiguous().view(-1, tgt_vocab_size), tgt_batch[:, 1:].contiguous().view(-1))
+            
+            loss.backward()
+            optimizer.step()
+            scheduler.step() # Update learning rate
+            
+        print(f"Epoch: {epoch + 1}, Loss: {loss.item():.4f}, Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
+   
+    # Save checkpoint every 10 epochs or if validation loss improves
+        if (epoch + 1) % 10 == 0 or loss.item() < best_val_loss:
+            save_checkpoint(transformer, optimizer, scheduler, epoch + 1, loss.item(), file_path="transformer_checkpoint.pth")
+            best_val_loss = min(best_val_loss, loss.item())
         
     transformer.eval()
+    
+     # Validation set (not included in dataset download above, you'll need to adjust for this)
+    val_ds = load_dataset("qanastek/WMT-16-PubMed", "en-es", split="validation")
+    val_dataloader = get_dataloader_from_dataset(val_ds, src_tokenizer, tgt_tokenizer, batch_size=batch_size)
 
-    # Generate random sample validation data
-    val_src_data = torch.randint(1, src_vocab_size, (64, max_seq_length))  # (batch_size, seq_length)
-    val_tgt_data = torch.randint(1, tgt_vocab_size, (64, max_seq_length))  # (batch_size, seq_length)
-
-    with torch.no_grad():
-
-        val_output = transformer(val_src_data, val_tgt_data[:, :-1])
-        val_loss = criterion(val_output.contiguous().view(-1, tgt_vocab_size), val_tgt_data[:, 1:].contiguous().view(-1))
-        print(f"Validation Loss: {val_loss.item()}")
+    with torch.no_grad(): 
+        val_loss_total = 0
+        for val_src, val_tgt in val_dataloader:
+            val_output = transformer(val_src, val_tgt[:, :-1])
+            val_loss = criterion(val_output.contiguous().view(-1, tgt_vocab_size), val_tgt[:, 1:].contiguous().view(-1))
+            val_loss_total += val_loss.item()
+        
+        print(f"Validation Loss: {val_loss_total / len(val_dataloader):.4f}")
+        
+        # Save final model
+        save_checkpoint(transformer, optimizer, scheduler, num_epochs, val_loss.item(), file_path="transformer_final.pth")
         
 
 if __name__ == "__main__":
