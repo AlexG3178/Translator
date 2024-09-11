@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
@@ -282,7 +283,14 @@ def main():
     
     dataloader = get_dataloader_from_dataset(train_ds, src_tokenizer, tgt_tokenizer, batch_size=32, max_length=128)
 
+    train_losses = []
+    val_losses = []
+    val_accs = []
+    epochs = []
+    
     for epoch in range(start_epoch, num_epochs):
+        transformer.train()  # Training mode
+        running_loss = 0
         for src_batch, tgt_batch in tqdm(dataloader):
             optimizer.zero_grad()
             
@@ -294,33 +302,64 @@ def main():
             
             loss.backward()
             optimizer.step()
-            scheduler.step() # Update learning rate
+            running_loss += loss.item()
             
-        print(f"Epoch: {epoch + 1}, Loss: {loss.item():.4f}, Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
-   
-    # Save checkpoint every 10 epochs or if validation loss improves
-        if (epoch + 1) % 10 == 0 or loss.item() < best_val_loss:
-            # save_checkpoint(transformer, optimizer, scheduler, epoch + 1, loss.item(), file_path="transformer_checkpoint.pth")
-            best_val_loss = min(best_val_loss, loss.item())
-        
-    transformer.eval()
+             # Store training loss
+        train_losses.append(running_loss / len(dataloader))
     
-    val_dataloader = get_dataloader_from_dataset(val_ds, src_tokenizer, tgt_tokenizer, batch_size=batch_size)
-
-    with torch.no_grad(): 
+        transformer.eval()  # Evaluation mode
         val_loss_total = 0
-        for val_src, val_tgt in val_dataloader:
-            val_src = val_src.to(device)
-            val_tgt = val_tgt.to(device)
-            val_output = transformer(val_src, val_tgt[:, :-1])
-            val_loss = criterion(val_output.contiguous().view(-1, tgt_vocab_size), val_tgt[:, 1:].contiguous().view(-1))
-            val_loss_total += val_loss.item()
+        val_correct_total = 0
         
-        print(f"Validation Loss: {val_loss_total / len(val_dataloader):.4f}")
+        val_dataloader = get_dataloader_from_dataset(val_ds, src_tokenizer, tgt_tokenizer, batch_size=batch_size)
+
+        with torch.no_grad():
+            val_loss_total = 0
+            val_correct_total = 0
+            for val_src, val_tgt in val_dataloader:
+                val_src = val_src.to(device)
+                val_tgt = val_tgt.to(device)
+
+                val_output = transformer(val_src, val_tgt[:, :-1])
+                val_loss = criterion(val_output.contiguous().view(-1, tgt_vocab_size), val_tgt[:, 1:].contiguous().view(-1))
+
+                val_loss_total += val_loss.item()  # No need to move to CPU, val_loss.item() is already a Python float
+
+                # Calculate accuracy and move to CPU before using it
+                correct = (torch.argmax(val_output, dim=-1) == val_tgt[:, 1:]).float()
+                val_correct_total += correct.sum().cpu() / correct.numel()  # Move to CPU before summing
+
+        val_losses.append(val_loss_total / len(val_dataloader))
+        val_accs.append((val_correct_total / len(val_dataloader)).item())  # Move to CPU and convert to scalar
+        epochs.append(epoch + 1)
         
-        # Save final model
-        # save_checkpoint(transformer, optimizer, scheduler, num_epochs, val_loss.item(), file_path="transformer_final.pth")
+        print(f"Epoch: {epoch + 1}, Train Loss: {train_losses[-1]:.4f}, Val Loss: {val_losses[-1]:.4f}, Val Acc: {val_accs[-1]:.4f}")
         
+        scheduler.step()  # Learning rate adjustment after each epoch    
+            
+        # Save checkpoint if loss improved
+        if (epoch + 1) % 10 == 0 or val_losses[-1] < best_val_loss:
+            save_checkpoint(transformer, optimizer, scheduler, epoch + 1, val_losses[-1], file_path="transformer_checkpoint.pth")    
+    
+        
+    # Plotting the training history
+    plt.figure(figsize=(10, 4))
+
+    plt.subplot(1, 2, 1) # Add an Axes to the current figure or retrieve an existing Axes
+    plt.plot(epochs, train_losses, '-o', label='Train loss')
+    plt.plot(epochs, val_losses, '-o', label='Validation loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, val_accs, '-o', label='Validation accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    
+    plt.show()
+
 
 if __name__ == "__main__":
     main()
