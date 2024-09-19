@@ -142,11 +142,19 @@ class EncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         
+        # Add Batch Normalization after Feed Forward Network and Attention layers
+        self.batch_norm1 = nn.BatchNorm1d(d_model)
+        self.batch_norm2 = nn.BatchNorm1d(d_model)
+        
     def forward(self, x, mask):
         attn_output = self.self_attn(x, x, x, mask)
         x = self.norm1(x + self.dropout(attn_output))
+        x = self.batch_norm1(x.transpose(1, 2)).transpose(1, 2)  # Apply BatchNorm and transpose to match dimensions
+        
         ff_output = self.feed_forward(x)
         x = self.norm2(x + self.dropout(ff_output))
+        x = self.batch_norm2(x.transpose(1, 2)).transpose(1, 2)  # Apply BatchNorm
+        
         return x
     
     
@@ -161,13 +169,23 @@ class DecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         
+        self.batch_norm1 = nn.BatchNorm1d(d_model)
+        self.batch_norm2 = nn.BatchNorm1d(d_model)
+        self.batch_norm3 = nn.BatchNorm1d(d_model)
+        
     def forward(self, x, enc_output, src_mask, tgt_mask):
         attn_output = self.self_attn(x, x, x, tgt_mask)
         x = self.norm1(x + self.dropout(attn_output))
+        x = self.batch_norm1(x.transpose(1, 2)).transpose(1, 2)
+        
         attn_output = self.cross_attn(x, enc_output, enc_output, src_mask)
         x = self.norm2(x + self.dropout(attn_output))
+        x = self.batch_norm2(x.transpose(1, 2)).transpose(1, 2)
+        
         ff_output = self.feed_forward(x)
         x = self.norm3(x + self.dropout(ff_output))
+        x = self.batch_norm3(x.transpose(1, 2)).transpose(1, 2)
+        
         return x
 
     
@@ -177,6 +195,9 @@ class Transformer(nn.Module):
         self.encoder_embedding = nn.Embedding(src_vocab_size, d_model)
         self.decoder_embedding = nn.Embedding(tgt_vocab_size, d_model)
         self.positional_encoding = PositionalEncoding(d_model)
+
+        # Add Batch Normalization after the embedding layer
+        self.batch_norm_emb = nn.BatchNorm1d(d_model)
 
         self.encoder_layers = nn.ModuleList([EncoderLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)])
         self.decoder_layers = nn.ModuleList([DecoderLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)])
@@ -196,6 +217,9 @@ class Transformer(nn.Module):
         src_mask, tgt_mask = self.generate_mask(src, tgt)
         src_embedded = self.dropout(self.positional_encoding(self.encoder_embedding(src)))
         tgt_embedded = self.dropout(self.positional_encoding(self.decoder_embedding(tgt)))
+        
+        src_embedded = self.batch_norm_emb(src_embedded.transpose(1, 2)).transpose(1, 2)
+        tgt_embedded = self.batch_norm_emb(tgt_embedded.transpose(1, 2)).transpose(1, 2)
 
         enc_output = src_embedded
         for enc_layer in self.encoder_layers:
@@ -275,14 +299,19 @@ def translate_sentence(model, src_sentence, src_tokenizer, tgt_tokenizer, device
 
 def main():    
 
-    num_epochs = 50
-    num_heads = 8
-    num_layers = 6
+    num_epochs = 50 # Early stopping: Epoch: 41, Train Loss: 0.0311, Val Loss: 0.3016, Val Acc: 0.9589
+    num_heads = 4 # was 8
+    num_layers = 4 # was6
     d_model = 512
     d_ff = 2048
-    dropout = 0.1
+    dropout = 0.2
+    weight_dec = 1e-4
     batch_size = 32
     learning_rate = 0.0001
+    patience = 5
+    best_loss = float('inf')
+    epochs_without_improvement = 0
+    src_sentence = "I'm not sure how long I want to finance my car for."
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -302,7 +331,7 @@ def main():
     transformer.to(device)
 
     criterion = nn.CrossEntropyLoss(ignore_index=0)
-    optimizer = optim.Adam(transformer.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-9)
+    optimizer = optim.Adam(transformer.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-9, weight_decay=weight_dec)
     
     # Define scheduler - StepLR reduces the learning rate by `gamma` every `step_size` epochs
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.95)
@@ -368,10 +397,19 @@ def main():
         
         scheduler.step()  # Learning rate adjustment after each epoch    
             
-        # Save checkpoint if loss improved
-        if (epoch + 1) % 10 == 0 or val_losses[-1] < best_val_loss:
-            save_checkpoint(transformer, optimizer, scheduler, epoch + 1, val_losses[-1], file_path="transformer_checkpoint.pth")    
-    
+        # Check if validation loss improved
+        if val_losses[-1] < best_loss:
+            best_loss = val_losses[-1]
+            epochs_without_improvement = 0
+            save_checkpoint(transformer, optimizer, scheduler, epoch + 1, val_losses[-1], file_path="transformer_checkpoint.pth")
+        else:
+            epochs_without_improvement += 1
+            print(f"Validation loss did not improve. Epochs without improvement: {epochs_without_improvement}/{patience}")
+            
+            # Early stopping check
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping at epoch {epoch + 1}")
+                break 
         
     # Plotting the training history
     plt.figure(figsize=(10, 4))
@@ -393,7 +431,6 @@ def main():
     
     
     # Translate
-    src_sentence = "Do you have any financing options for people with bad credit?"
     translated_sentence = translate_sentence(transformer, src_sentence, src_tokenizer, tgt_tokenizer, device)
     print(f"Source: {src_sentence}")
     print(f"Translated: {translated_sentence}")
