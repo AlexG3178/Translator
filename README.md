@@ -11,7 +11,7 @@ Table of Contents:
 6. Training
 7. Evaluation
 8. Checkpointing
-9.Visualization
+9. Visualization
 
 Overview
 This project is a machine translation system based on the original Transformer model proposed in "Attention is All You Need". 
